@@ -37,6 +37,7 @@ import { PermissionChecker } from '@/UserManagement/PermissionChecker';
 import { Logger } from '@/Logger';
 import { WorkflowStaticDataService } from '@/workflows/workflowStaticData.service';
 import { EventService } from './eventbus/event.service';
+import { isPartialExecutionEnabled } from './FeatureFlags';
 
 @Service()
 export class WorkflowRunner {
@@ -115,6 +116,7 @@ export class WorkflowRunner {
 	async run(
 		data: IWorkflowExecutionDataProcess,
 		loadStaticData?: boolean,
+		// TODO: Figure out what this is for
 		realtime?: boolean,
 		restartExecutionId?: string,
 		responsePromise?: IDeferredPromise<IExecuteResponsePromiseData>,
@@ -140,6 +142,7 @@ export class WorkflowRunner {
 			this.activeExecutions.attachResponsePromise(executionId, responsePromise);
 		}
 
+		// NOTE: queue mode
 		if (this.executionsMode === 'queue' && data.executionMode !== 'manual') {
 			// Do not run "manual" executions in bull because sending events to the
 			// frontend would not be possible
@@ -200,6 +203,9 @@ export class WorkflowRunner {
 	): Promise<void> {
 		const workflowId = data.workflowData.id;
 		if (loadStaticData === true && workflowId) {
+			// TODO: Can we assign static data to a variable instead of mutating `data`?
+			// NOTE: This is the workflow and node specific data that can be saved
+			// and retrieved with the code node.
 			data.workflowData.staticData =
 				await this.workflowStaticDataService.getStaticDataById(workflowId);
 		}
@@ -217,6 +223,8 @@ export class WorkflowRunner {
 
 		let pinData: IPinData | undefined;
 		if (data.executionMode === 'manual') {
+			// TODO: Find out why pin data exists on both objects and if we need both
+			// or if one can be cleaned up.
 			pinData = data.pinData ?? data.workflowData.pinData;
 		}
 
@@ -231,6 +239,8 @@ export class WorkflowRunner {
 			settings: workflowSettings,
 			pinData,
 		});
+		// NOTE: This seems like a catchall so we can pass anything deep into the
+		// workflow execution engine.
 		const additionalData = await WorkflowExecuteAdditionalData.getBase(
 			data.userId,
 			undefined,
@@ -246,6 +256,8 @@ export class WorkflowRunner {
 			{ executionId },
 		);
 		let workflowExecution: PCancelable<IRun>;
+		// NOTE: This is were we update the status of the execution in the
+		// database. And this is where the race condition happens.
 		await this.executionRepository.updateStatus(executionId, 'running');
 
 		try {
@@ -257,6 +269,8 @@ export class WorkflowRunner {
 				},
 			];
 
+			// TODO: Why the detour through the WorkflowExecuteAdditionalData to call
+			// ActiveExecutions?
 			additionalData.setExecutionStatus = WorkflowExecuteAdditionalData.setExecutionStatus.bind({
 				executionId,
 			});
@@ -266,7 +280,12 @@ export class WorkflowRunner {
 			});
 
 			if (data.executionData !== undefined) {
-				this.logger.debug(`Execution ID ${executionId} had Execution data. Running with payload.`, {
+				// TODO: What's the difference between `data.executionData` and `data.runData`?
+				// I think this is the data coming from a webhook or a trigger, e.g. the
+				// body of a POST request or the message of a queue message.
+				console.trace('data.executionData', JSON.stringify(data.executionData, null, 2));
+
+				console.debug(`Execution ID ${executionId} had Execution data. Running with payload.`, {
 					executionId,
 				});
 				const workflowExecute = new WorkflowExecute(
@@ -280,7 +299,8 @@ export class WorkflowRunner {
 				data.startNodes === undefined ||
 				data.startNodes.length === 0
 			) {
-				this.logger.debug(`Execution ID ${executionId} will run executing all nodes.`, {
+				// Full Execution
+				console.debug(`Execution ID ${executionId} will run executing all nodes.`, {
 					executionId,
 				});
 				// Execute all nodes
@@ -296,16 +316,29 @@ export class WorkflowRunner {
 					data.pinData,
 				);
 			} else {
-				this.logger.debug(`Execution ID ${executionId} is a partial execution.`, { executionId });
+				// Partial Execution
+				console.debug(`Execution ID ${executionId} is a partial execution.`, { executionId });
 				// Execute only the nodes between start and destination nodes
 				const workflowExecute = new WorkflowExecute(additionalData, data.executionMode);
-				workflowExecution = workflowExecute.runPartialWorkflow(
-					workflow,
-					data.runData,
-					data.startNodes,
-					data.destinationNode,
-					data.pinData,
-				);
+
+				if (await isPartialExecutionEnabled()) {
+					console.debug('Partial execution is enabled');
+					workflowExecution = workflowExecute.runPartialWorkflow2(
+						workflow,
+						data.runData,
+						data.startNodes,
+						data.destinationNode,
+						data.pinData,
+					);
+				} else {
+					workflowExecution = workflowExecute.runPartialWorkflow(
+						workflow,
+						data.runData,
+						data.startNodes,
+						data.destinationNode,
+						data.pinData,
+					);
+				}
 			}
 
 			this.activeExecutions.attachWorkflowExecution(executionId, workflowExecution);
