@@ -48,15 +48,14 @@ import {
 } from 'n8n-workflow';
 import get from 'lodash/get';
 import * as NodeExecuteFunctions from './NodeExecuteFunctions';
+import { recreateNodeExecutionStack } from './PartialExecutionUtils/recreateNodeExecutionStack';
 import {
 	DirectedGraph,
 	findCycles,
 	findStartNodes,
 	findSubgraph,
 	findTriggerForPartialExecution,
-} from './utils';
-// TODO: move into it's own folder
-import { recreateNodeExecutionStack } from './utils-2';
+} from './PartialExecutionUtils';
 
 export class WorkflowExecute {
 	private status: ExecutionStatus = 'new';
