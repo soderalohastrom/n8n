@@ -52,8 +52,7 @@ import {
 	DirectedGraph,
 	findCycles,
 	findStartNodes,
-	// TODO: rename to findSubgraph
-	findSubgraph2,
+	findSubgraph,
 	findTriggerForPartialExecution,
 } from './utils';
 // TODO: move into it's own folder
@@ -346,7 +345,7 @@ export class WorkflowExecute {
 		}
 
 		// 2. Find the Subgraph
-		const subgraph = findSubgraph2(DirectedGraph.fromWorkflow(workflow), destinationNode, trigger);
+		const subgraph = findSubgraph(DirectedGraph.fromWorkflow(workflow), destinationNode, trigger);
 		const filteredNodes = subgraph.getNodes();
 
 		// 3. Find the Start Nodes
