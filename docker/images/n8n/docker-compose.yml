@@ -1,0 +1,19 @@
+version: '3'
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n
+    ports:
+      - "5678:5678"
+    environment:
+      - DB_TYPE=mysqldb
+      - DB_MYSQLDB_DATABASE=application_kelleher
+      - DB_MYSQLDB_HOST=host.docker.internal
+      - DB_MYSQLDB_PORT=3306
+      - DB_MYSQLDB_USER=root
+      - DB_MYSQLDB_PASSWORD=rootberry
+      - GENERIC_TIMEZONE=Pacific/Honolulu
+      - TZ=Pacific/Honolulu
+    volumes:
+      - ~/.n8n:/home/node/.n8n
+    command: ["n8n", "start", "--tunnel"]
+    restart: unless-stopped
