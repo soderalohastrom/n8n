@@ -1,5 +1,4 @@
 import { Response } from 'express';
-import { rateLimit } from 'express-rate-limit';
 import validator from 'validator';
 
 import { AuthService } from '@/auth/auth.service';
@@ -10,31 +9,24 @@ import { PasswordResetRequest } from '@/requests';
 import { isSamlCurrentAuthenticationMethod } from '@/sso/ssoHelpers';
 import { UserService } from '@/services/user.service';
 import { License } from '@/License';
-import { RESPONSE_ERROR_MESSAGES, inTest } from '@/constants';
+import { RESPONSE_ERROR_MESSAGES } from '@/constants';
 import { MfaService } from '@/Mfa/mfa.service';
 import { Logger } from '@/Logger';
 import { ExternalHooks } from '@/ExternalHooks';
-import { InternalHooks } from '@/InternalHooks';
 import { UrlService } from '@/services/url.service';
 import { InternalServerError } from '@/errors/response-errors/internal-server.error';
 import { BadRequestError } from '@/errors/response-errors/bad-request.error';
-import { UnauthorizedError } from '@/errors/response-errors/unauthorized.error';
+import { ForbiddenError } from '@/errors/response-errors/forbidden.error';
 import { NotFoundError } from '@/errors/response-errors/not-found.error';
 import { UnprocessableRequestError } from '@/errors/response-errors/unprocessable.error';
 import { UserRepository } from '@/databases/repositories/user.repository';
-
-const throttle = rateLimit({
-	windowMs: 5 * 60 * 1000, // 5 minutes
-	limit: 5, // Limit each IP to 5 requests per `window` (here, per 5 minutes).
-	message: { message: 'Too many requests' },
-});
+import { EventService } from '@/events/event.service';
 
 @RestController()
 export class PasswordResetController {
 	constructor(
 		private readonly logger: Logger,
 		private readonly externalHooks: ExternalHooks,
-		private readonly internalHooks: InternalHooks,
 		private readonly mailer: UserManagementMailer,
 		private readonly authService: AuthService,
 		private readonly userService: UserService,
@@ -43,15 +35,13 @@ export class PasswordResetController {
 		private readonly license: License,
 		private readonly passwordUtility: PasswordUtility,
 		private readonly userRepository: UserRepository,
+		private readonly eventService: EventService,
 	) {}
 
 	/**
 	 * Send a password reset email.
 	 */
-	@Post('/forgot-password', {
-		middlewares: !inTest ? [throttle] : [],
-		skipAuth: true,
-	})
+	@Post('/forgot-password', { skipAuth: true, rateLimit: { limit: 3 } })
 	async forgotPassword(req: PasswordResetRequest.Email) {
 		if (!this.mailer.isEmailSetUp) {
 			this.logger.debug(
@@ -86,19 +76,19 @@ export class PasswordResetController {
 			this.logger.debug(
 				'Request to send password reset email failed because the user limit was reached',
 			);
-			throw new UnauthorizedError(RESPONSE_ERROR_MESSAGES.USERS_QUOTA_REACHED);
+			throw new ForbiddenError(RESPONSE_ERROR_MESSAGES.USERS_QUOTA_REACHED);
 		}
 		if (
 			isSamlCurrentAuthenticationMethod() &&
 			!(
-				(user && user.hasGlobalScope('user:resetPassword')) === true ||
+				user?.hasGlobalScope('user:resetPassword') === true ||
 				user?.settings?.allowSSOManualLogin === true
 			)
 		) {
 			this.logger.debug(
 				'Request to send password reset email failed because login is handled by SAML',
 			);
-			throw new UnauthorizedError(
+			throw new ForbiddenError(
 				'Login is handled by SAML. Please contact your Identity Provider to reset your password.',
 			);
 		}
@@ -128,10 +118,10 @@ export class PasswordResetController {
 				domain: this.urlService.getInstanceBaseUrl(),
 			});
 		} catch (error) {
-			void this.internalHooks.onEmailFailed({
+			this.eventService.emit('email-failed', {
 				user,
-				message_type: 'Reset password',
-				public_api: false,
+				messageType: 'Reset password',
+				publicApi: false,
 			});
 			if (error instanceof Error) {
 				throw new InternalServerError(`Please contact your administrator: ${error.message}`);
@@ -139,13 +129,13 @@ export class PasswordResetController {
 		}
 
 		this.logger.info('Sent password reset email successfully', { userId: user.id, email });
-		void this.internalHooks.onUserTransactionalEmail({
-			user_id: id,
-			message_type: 'Reset password',
-			public_api: false,
+		this.eventService.emit('user-transactional-email-sent', {
+			userId: id,
+			messageType: 'Reset password',
+			publicApi: false,
 		});
 
-		void this.internalHooks.onUserPasswordResetRequestClick({ user });
+		this.eventService.emit('user-password-reset-request-click', { user });
 	}
 
 	/**
@@ -173,11 +163,11 @@ export class PasswordResetController {
 				'Request to resolve password token failed because the user limit was reached',
 				{ userId: user.id },
 			);
-			throw new UnauthorizedError(RESPONSE_ERROR_MESSAGES.USERS_QUOTA_REACHED);
+			throw new ForbiddenError(RESPONSE_ERROR_MESSAGES.USERS_QUOTA_REACHED);
 		}
 
 		this.logger.info('Reset-password token resolved successfully', { userId: user.id });
-		void this.internalHooks.onUserPasswordResetEmailClick({ user });
+		this.eventService.emit('user-password-reset-email-click', { user });
 	}
 
 	/**
@@ -218,19 +208,17 @@ export class PasswordResetController {
 
 		this.logger.info('User password updated successfully', { userId: user.id });
 
-		this.authService.issueCookie(res, user);
+		this.authService.issueCookie(res, user, req.browserId);
 
-		void this.internalHooks.onUserUpdate({
-			user,
-			fields_changed: ['password'],
-		});
+		this.eventService.emit('user-updated', { user, fieldsChanged: ['password'] });
 
-		// if this user used to be an LDAP users
+		// if this user used to be an LDAP user
 		const ldapIdentity = user?.authIdentities?.find((i) => i.providerType === 'ldap');
 		if (ldapIdentity) {
-			void this.internalHooks.onUserSignup(user, {
-				user_type: 'email',
-				was_disabled_ldap_user: true,
+			this.eventService.emit('user-signed-up', {
+				user,
+				userType: 'email',
+				wasDisabledLdapUser: true,
 			});
 		}
 

@@ -2,25 +2,27 @@ import { Container, Service } from 'typedi';
 import { readFile } from 'fs/promises';
 import type { Server } from 'http';
 import express from 'express';
+import { engine as expressHandlebars } from 'express-handlebars';
 import compression from 'compression';
 import isbot from 'isbot';
 
 import config from '@/config';
-import { N8N_VERSION, inDevelopment, inTest } from '@/constants';
+import { N8N_VERSION, TEMPLATES_DIR, inDevelopment, inTest } from '@/constants';
 import * as Db from '@/Db';
 import { N8nInstanceType } from '@/Interfaces';
 import { ExternalHooks } from '@/ExternalHooks';
 import { send, sendErrorResponse } from '@/ResponseHelper';
 import { rawBodyReader, bodyParser, corsMiddleware } from '@/middlewares';
-import { TestWebhooks } from '@/TestWebhooks';
 import { WaitingForms } from '@/WaitingForms';
-import { WaitingWebhooks } from '@/WaitingWebhooks';
-import { webhookRequestHandler } from '@/WebhookHelpers';
+import { TestWebhooks } from '@/webhooks/TestWebhooks';
+import { WaitingWebhooks } from '@/webhooks/WaitingWebhooks';
+import { createWebhookHandlerFor } from '@/webhooks/WebhookRequestHandler';
+import { LiveWebhooks } from '@/webhooks/LiveWebhooks';
 import { generateHostInstanceId } from './databases/utils/generators';
 import { Logger } from '@/Logger';
 import { ServiceUnavailableError } from './errors/response-errors/service-unavailable.error';
 import { OnShutdown } from '@/decorators/OnShutdown';
-import { ActiveWebhooks } from '@/ActiveWebhooks';
+import { GlobalConfig } from '@n8n/config';
 
 @Service()
 export abstract class AbstractServer {
@@ -32,7 +34,7 @@ export abstract class AbstractServer {
 
 	protected externalHooks: ExternalHooks;
 
-	protected protocol: string;
+	protected globalConfig = Container.get(GlobalConfig);
 
 	protected sslKey: string;
 
@@ -62,22 +64,25 @@ export abstract class AbstractServer {
 		this.app = express();
 		this.app.disable('x-powered-by');
 
+		this.app.engine('handlebars', expressHandlebars({ defaultLayout: false }));
+		this.app.set('view engine', 'handlebars');
+		this.app.set('views', TEMPLATES_DIR);
+
 		const proxyHops = config.getEnv('proxy_hops');
 		if (proxyHops > 0) this.app.set('trust proxy', proxyHops);
 
-		this.protocol = config.getEnv('protocol');
 		this.sslKey = config.getEnv('ssl_key');
 		this.sslCert = config.getEnv('ssl_cert');
 
-		this.restEndpoint = config.getEnv('endpoints.rest');
+		this.restEndpoint = this.globalConfig.endpoints.rest;
 
-		this.endpointForm = config.getEnv('endpoints.form');
-		this.endpointFormTest = config.getEnv('endpoints.formTest');
-		this.endpointFormWaiting = config.getEnv('endpoints.formWaiting');
+		this.endpointForm = this.globalConfig.endpoints.form;
+		this.endpointFormTest = this.globalConfig.endpoints.formTest;
+		this.endpointFormWaiting = this.globalConfig.endpoints.formWaiting;
 
-		this.endpointWebhook = config.getEnv('endpoints.webhook');
-		this.endpointWebhookTest = config.getEnv('endpoints.webhookTest');
-		this.endpointWebhookWaiting = config.getEnv('endpoints.webhookWaiting');
+		this.endpointWebhook = this.globalConfig.endpoints.webhook;
+		this.endpointWebhookTest = this.globalConfig.endpoints.webhookTest;
+		this.endpointWebhookWaiting = this.globalConfig.endpoints.webhookWaiting;
 
 		this.uniqueInstanceId = generateHostInstanceId(instanceType);
 
@@ -115,12 +120,12 @@ export abstract class AbstractServer {
 
 	private async setupHealthCheck() {
 		// health check should not care about DB connections
-		this.app.get('/healthz', async (req, res) => {
+		this.app.get('/healthz', async (_req, res) => {
 			res.send({ status: 'ok' });
 		});
 
 		const { connectionState } = Db;
-		this.app.use((req, res, next) => {
+		this.app.use((_req, res, next) => {
 			if (connectionState.connected) {
 				if (connectionState.migrated) next();
 				else res.send('n8n is starting up. Please wait');
@@ -129,7 +134,8 @@ export abstract class AbstractServer {
 	}
 
 	async init(): Promise<void> {
-		const { app, protocol, sslKey, sslCert } = this;
+		const { app, sslKey, sslCert } = this;
+		const { protocol } = this.globalConfig;
 
 		if (protocol === 'https' && sslKey && sslCert) {
 			const https = await import('https');
@@ -145,25 +151,24 @@ export abstract class AbstractServer {
 			this.server = http.createServer(app);
 		}
 
-		const PORT = config.getEnv('port');
-		const ADDRESS = config.getEnv('listen_address');
+		const { port, listen_address: address } = Container.get(GlobalConfig);
 
 		this.server.on('error', (error: Error & { code: string }) => {
 			if (error.code === 'EADDRINUSE') {
-				console.log(
-					`n8n's port ${PORT} is already in use. Do you have another instance of n8n running already?`,
+				this.logger.info(
+					`n8n's port ${port} is already in use. Do you have another instance of n8n running already?`,
 				);
 				process.exit(1);
 			}
 		});
 
-		await new Promise<void>((resolve) => this.server.listen(PORT, ADDRESS, () => resolve()));
+		await new Promise<void>((resolve) => this.server.listen(port, address, () => resolve()));
 
 		this.externalHooks = Container.get(ExternalHooks);
 
 		await this.setupHealthCheck();
 
-		console.log(`n8n ready on ${ADDRESS}, port ${PORT}`);
+		this.logger.info(`n8n ready on ${address}, port ${port}`);
 	}
 
 	async start(): Promise<void> {
@@ -176,40 +181,32 @@ export abstract class AbstractServer {
 
 		// Setup webhook handlers before bodyParser, to let the Webhook node handle binary data in requests
 		if (this.webhooksEnabled) {
-			const activeWebhooks = Container.get(ActiveWebhooks);
+			const liveWebhooksRequestHandler = createWebhookHandlerFor(Container.get(LiveWebhooks));
+			// Register a handler for live forms
+			this.app.all(`/${this.endpointForm}/:path(*)`, liveWebhooksRequestHandler);
 
-			// Register a handler for active forms
-			this.app.all(`/${this.endpointForm}/:path(*)`, webhookRequestHandler(activeWebhooks));
-
-			// Register a handler for active webhooks
-			this.app.all(`/${this.endpointWebhook}/:path(*)`, webhookRequestHandler(activeWebhooks));
+			// Register a handler for live webhooks
+			this.app.all(`/${this.endpointWebhook}/:path(*)`, liveWebhooksRequestHandler);
 
 			// Register a handler for waiting forms
 			this.app.all(
 				`/${this.endpointFormWaiting}/:path/:suffix?`,
-				webhookRequestHandler(Container.get(WaitingForms)),
+				createWebhookHandlerFor(Container.get(WaitingForms)),
 			);
 
 			// Register a handler for waiting webhooks
 			this.app.all(
 				`/${this.endpointWebhookWaiting}/:path/:suffix?`,
-				webhookRequestHandler(Container.get(WaitingWebhooks)),
+				createWebhookHandlerFor(Container.get(WaitingWebhooks)),
 			);
 		}
 
 		if (this.testWebhooksEnabled) {
-			const testWebhooks = Container.get(TestWebhooks);
+			const testWebhooksRequestHandler = createWebhookHandlerFor(Container.get(TestWebhooks));
 
 			// Register a handler
-			this.app.all(`/${this.endpointFormTest}/:path(*)`, webhookRequestHandler(testWebhooks));
-			this.app.all(`/${this.endpointWebhookTest}/:path(*)`, webhookRequestHandler(testWebhooks));
-
-			// Removes a test webhook
-			// TODO UM: check if this needs validation with user management.
-			this.app.delete(
-				`/${this.restEndpoint}/test-webhook/:id`,
-				send(async (req) => await testWebhooks.cancelWebhook(req.params.id)),
-			);
+			this.app.all(`/${this.endpointFormTest}/:path(*)`, testWebhooksRequestHandler);
+			this.app.all(`/${this.endpointWebhookTest}/:path(*)`, testWebhooksRequestHandler);
 		}
 
 		// Block bots from scanning the application
@@ -226,17 +223,27 @@ export abstract class AbstractServer {
 			this.setupDevMiddlewares();
 		}
 
+		if (this.testWebhooksEnabled) {
+			const testWebhooks = Container.get(TestWebhooks);
+			// Removes a test webhook
+			// TODO UM: check if this needs validation with user management.
+			this.app.delete(
+				`/${this.restEndpoint}/test-webhook/:id`,
+				send(async (req) => await testWebhooks.cancelWebhook(req.params.id)),
+			);
+		}
+
 		// Setup body parsing middleware after the webhook handlers are setup
 		this.app.use(bodyParser);
 
 		await this.configure();
 
 		if (!inTest) {
-			console.log(`Version: ${N8N_VERSION}`);
+			this.logger.info(`Version: ${N8N_VERSION}`);
 
 			const defaultLocale = config.getEnv('defaultLocale');
 			if (defaultLocale !== 'en') {
-				console.log(`Locale: ${defaultLocale}`);
+				this.logger.info(`Locale: ${defaultLocale}`);
 			}
 
 			await this.externalHooks.run('n8n.ready', [this, config]);
@@ -254,14 +261,16 @@ export abstract class AbstractServer {
 			return;
 		}
 
-		this.logger.debug(`Shutting down ${this.protocol} server`);
+		const { protocol } = this.globalConfig;
+
+		this.logger.debug(`Shutting down ${protocol} server`);
 
 		this.server.close((error) => {
 			if (error) {
-				this.logger.error(`Error while shutting down ${this.protocol} server`, { error });
+				this.logger.error(`Error while shutting down ${protocol} server`, { error });
 			}
 
-			this.logger.debug(`${this.protocol} server shut down`);
+			this.logger.debug(`${protocol} server shut down`);
 		});
 	}
 }

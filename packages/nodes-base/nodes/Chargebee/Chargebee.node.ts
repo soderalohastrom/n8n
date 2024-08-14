@@ -283,7 +283,7 @@ export class Chargebee implements INodeType {
 									},
 								],
 								default: 'after',
-								description: 'Operation to decide where the the data should be mapped to',
+								description: 'Operation to decide where the data should be mapped to',
 							},
 							{
 								displayName: 'Date',
@@ -330,7 +330,7 @@ export class Chargebee implements INodeType {
 									},
 								],
 								default: 'gt',
-								description: 'Operation to decide where the the data should be mapped to',
+								description: 'Operation to decide where the data should be mapped to',
 							},
 							{
 								displayName: 'Amount',
@@ -484,7 +484,7 @@ export class Chargebee implements INodeType {
 								key === 'customProperties' &&
 								(properties.customProperties as IDataObject).property !== undefined
 							) {
-								for (const customProperty of (properties.customProperties as IDataObject)!
+								for (const customProperty of (properties.customProperties as IDataObject)
 									.property! as CustomProperty[]) {
 									qs[customProperty.name] = customProperty.value;
 								}
@@ -627,7 +627,7 @@ export class Chargebee implements INodeType {
 					returnData.push(...responseData);
 				}
 			} catch (error) {
-				if (this.continueOnFail()) {
+				if (this.continueOnFail(error)) {
 					returnData.push({ error: error.message, json: {}, itemIndex: i });
 					continue;
 				}

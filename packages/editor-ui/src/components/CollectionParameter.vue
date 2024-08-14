@@ -13,7 +13,7 @@
 					:hide-delete="hideDelete"
 					:indent="true"
 					:is-read-only="isReadOnly"
-					@valueChanged="valueChanged"
+					@value-changed="valueChanged"
 				/>
 			</Suspense>
 
@@ -31,7 +31,7 @@
 						:placeholder="getPlaceholderText"
 						size="small"
 						filterable
-						@update:modelValue="optionSelected"
+						@update:model-value="optionSelected"
 					>
 						<n8n-option
 							v-for="item in parameterOptions"
@@ -72,12 +72,13 @@ export interface Props {
 	nodeValues: INodeParameters;
 	parameter: INodeProperties;
 	path: string;
-	values: INodeProperties;
+	values: INodeParameters;
 	isReadOnly?: boolean;
 }
 const emit = defineEmits<{
-	(event: 'valueChanged', value: IUpdateInformation): void;
+	valueChanged: [value: IUpdateInformation];
 }>();
+
 const props = defineProps<Props>();
 const ndvStore = useNDVStore();
 const i18n = useI18n();
@@ -134,7 +135,7 @@ const getProperties = computed(() => {
 	const returnProperties = [];
 	let tempProperties;
 	for (const name of propertyNames.value) {
-		tempProperties = getOptionProperties(name);
+		tempProperties = getOptionProperties(name) as INodeProperties[];
 		if (tempProperties !== undefined) {
 			returnProperties.push(...tempProperties);
 		}

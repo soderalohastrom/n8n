@@ -7,10 +7,10 @@ import {
 	type SupplyData,
 } from 'n8n-workflow';
 
-import type { ClientOptions } from 'openai';
-import { ChatOpenAI } from 'langchain/chat_models/openai';
-import { logWrapper } from '../../../utils/logWrapper';
+import type { ClientOptions } from '@langchain/openai';
+import { ChatOpenAI } from '@langchain/openai';
 import { getConnectionHintNoticeField } from '../../../utils/sharedFields';
+import { N8nLlmTracing } from '../N8nLlmTracing';
 
 export class LmChatAzureOpenAi implements INodeType {
 	description: INodeTypeDescription = {
@@ -27,7 +27,8 @@ export class LmChatAzureOpenAi implements INodeType {
 		codex: {
 			categories: ['AI'],
 			subcategories: {
-				AI: ['Language Models'],
+				AI: ['Language Models', 'Root Nodes'],
+				'Language Models': ['Chat Models (Recommended)'],
 			},
 			resources: {
 				primaryDocumentation: [
@@ -160,10 +161,11 @@ export class LmChatAzureOpenAi implements INodeType {
 			timeout: options.timeout ?? 60000,
 			maxRetries: options.maxRetries ?? 2,
 			configuration,
+			callbacks: [new N8nLlmTracing(this)],
 		});
 
 		return {
-			response: logWrapper(model, this),
+			response: model,
 		};
 	}
 }

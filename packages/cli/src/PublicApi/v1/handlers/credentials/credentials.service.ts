@@ -16,6 +16,8 @@ import type { CredentialRequest } from '@/requests';
 import { Container } from 'typedi';
 import { CredentialsRepository } from '@db/repositories/credentials.repository';
 import { SharedCredentialsRepository } from '@db/repositories/sharedCredentials.repository';
+import { ProjectRepository } from '@/databases/repositories/project.repository';
+import { EventService } from '@/events/event.service';
 
 export async function getCredentials(credentialId: string): Promise<ICredentialsDb | null> {
 	return await Container.get(CredentialsRepository).findOneBy({ id: credentialId });
@@ -27,7 +29,7 @@ export async function getSharedCredentials(
 ): Promise<SharedCredentials | null> {
 	return await Container.get(SharedCredentialsRepository).findOne({
 		where: {
-			userId,
+			project: { projectRelations: { userId } },
 			credentialsId: credentialId,
 		},
 		relations: ['credentials'],
@@ -41,20 +43,6 @@ export async function createCredential(
 
 	Object.assign(newCredential, properties);
 
-	if (!newCredential.nodesAccess || newCredential.nodesAccess.length === 0) {
-		newCredential.nodesAccess = [
-			{
-				nodeType: `n8n-nodes-base.${properties.type?.toLowerCase() ?? 'unknown'}`,
-				date: new Date(),
-			},
-		];
-	} else {
-		// Add the added date for node access permissions
-		newCredential.nodesAccess.forEach((nodeAccess) => {
-			nodeAccess.date = new Date();
-		});
-	}
-
 	return newCredential;
 }
 
@@ -63,39 +51,63 @@ export async function saveCredential(
 	user: User,
 	encryptedData: ICredentialsDb,
 ): Promise<CredentialsEntity> {
-	await Container.get(ExternalHooks).run('credentials.create', [encryptedData]);
-
-	return await Db.transaction(async (transactionManager) => {
+	const result = await Db.transaction(async (transactionManager) => {
 		const savedCredential = await transactionManager.save<CredentialsEntity>(credential);
 
 		savedCredential.data = credential.data;
 
 		const newSharedCredential = new SharedCredentials();
 
+		const personalProject = await Container.get(ProjectRepository).getPersonalProjectForUserOrFail(
+			user.id,
+			transactionManager,
+		);
+
 		Object.assign(newSharedCredential, {
 			role: 'credential:owner',
-			user,
 			credentials: savedCredential,
+			projectId: personalProject.id,
 		});
 
 		await transactionManager.save<SharedCredentials>(newSharedCredential);
 
 		return savedCredential;
 	});
+
+	await Container.get(ExternalHooks).run('credentials.create', [encryptedData]);
+
+	const project = await Container.get(SharedCredentialsRepository).findCredentialOwningProject(
+		credential.id,
+	);
+
+	Container.get(EventService).emit('credentials-created', {
+		user,
+		credentialType: credential.type,
+		credentialId: credential.id,
+		projectId: project?.id,
+		projectType: project?.type,
+		publicApi: true,
+	});
+
+	return result;
 }
 
-export async function removeCredential(credentials: CredentialsEntity): Promise<ICredentialsDb> {
+export async function removeCredential(
+	user: User,
+	credentials: CredentialsEntity,
+): Promise<ICredentialsDb> {
 	await Container.get(ExternalHooks).run('credentials.delete', [credentials.id]);
+	Container.get(EventService).emit('credentials-deleted', {
+		user,
+		credentialType: credentials.type,
+		credentialId: credentials.id,
+	});
 	return await Container.get(CredentialsRepository).remove(credentials);
 }
 
 export async function encryptCredential(credential: CredentialsEntity): Promise<ICredentialsDb> {
 	// Encrypt the data
-	const coreCredential = new Credentials(
-		{ id: null, name: credential.name },
-		credential.type,
-		credential.nodesAccess,
-	);
+	const coreCredential = new Credentials({ id: null, name: credential.name }, credential.type);
 
 	// @ts-ignore
 	coreCredential.setData(credential.data);
@@ -115,7 +127,7 @@ export function sanitizeCredentials(
 	const credentialsList = argIsArray ? credentials : [credentials];
 
 	const sanitizedCredentials = credentialsList.map((credential) => {
-		const { data, nodesAccess, shared, ...rest } = credential;
+		const { data, shared, ...rest } = credential;
 		return rest;
 	});
 
@@ -159,6 +171,7 @@ export function toJsonSchema(properties: INodeProperties[]): IDataObject {
 	// object in the JSON Schema definition. This allows us
 	// to later validate that only this properties are set in
 	// the credentials sent in the API call.
+	// eslint-disable-next-line complexity
 	properties.forEach((property) => {
 		if (property.required) {
 			requiredFields.push(property.name);

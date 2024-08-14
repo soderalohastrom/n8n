@@ -4,9 +4,8 @@ import type express from 'express';
 import { CredentialsHelper } from '@/CredentialsHelper';
 import { CredentialTypes } from '@/CredentialTypes';
 import type { CredentialsEntity } from '@db/entities/CredentialsEntity';
-import type { CredentialRequest } from '@/requests';
-import type { CredentialTypeRequest } from '../../../types';
-import { authorize } from '../../shared/middlewares/global.middleware';
+import type { CredentialTypeRequest, CredentialRequest } from '../../../types';
+import { projectScope } from '../../shared/middlewares/global.middleware';
 import { validCredentialsProperties, validCredentialType } from './credentials.middleware';
 
 import {
@@ -20,10 +19,11 @@ import {
 	toJsonSchema,
 } from './credentials.service';
 import { Container } from 'typedi';
+import { z } from 'zod';
+import { EnterpriseCredentialsService } from '@/credentials/credentials.service.ee';
 
 export = {
 	createCredential: [
-		authorize(['global:owner', 'global:admin', 'global:member']),
 		validCredentialType,
 		validCredentialsProperties,
 		async (
@@ -46,8 +46,22 @@ export = {
 			}
 		},
 	],
+	transferCredential: [
+		projectScope('credential:move', 'credential'),
+		async (req: CredentialRequest.Transfer, res: express.Response) => {
+			const body = z.object({ destinationProjectId: z.string() }).parse(req.body);
+
+			await Container.get(EnterpriseCredentialsService).transferOne(
+				req.user,
+				req.params.workflowId,
+				body.destinationProjectId,
+			);
+
+			res.status(204).send();
+		},
+	],
 	deleteCredential: [
-		authorize(['global:owner', 'global:admin', 'global:member']),
+		projectScope('credential:delete', 'credential'),
 		async (
 			req: CredentialRequest.Delete,
 			res: express.Response,
@@ -69,13 +83,12 @@ export = {
 				return res.status(404).json({ message: 'Not Found' });
 			}
 
-			await removeCredential(credential);
+			await removeCredential(req.user, credential);
 			return res.json(sanitizeCredentials(credential));
 		},
 	],
 
 	getCredentialType: [
-		authorize(['global:owner', 'global:admin', 'global:member']),
 		async (req: CredentialTypeRequest.Get, res: express.Response): Promise<express.Response> => {
 			const { credentialTypeName } = req.params;
 

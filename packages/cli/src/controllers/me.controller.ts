@@ -1,12 +1,12 @@
 import validator from 'validator';
 import { plainToInstance } from 'class-transformer';
-import { Response } from 'express';
+import { type RequestHandler, Response } from 'express';
 import { randomBytes } from 'crypto';
 
 import { AuthService } from '@/auth/auth.service';
 import { Delete, Get, Patch, Post, RestController } from '@/decorators';
 import { PasswordUtility } from '@/services/password.utility';
-import { validateEntity } from '@/GenericHelpers';
+import { validateEntity, validateRecordNoXss } from '@/GenericHelpers';
 import type { User } from '@db/entities/User';
 import {
 	AuthenticatedRequest,
@@ -19,20 +19,34 @@ import { isSamlLicensedAndEnabled } from '@/sso/saml/samlHelpers';
 import { UserService } from '@/services/user.service';
 import { Logger } from '@/Logger';
 import { ExternalHooks } from '@/ExternalHooks';
-import { InternalHooks } from '@/InternalHooks';
 import { BadRequestError } from '@/errors/response-errors/bad-request.error';
 import { UserRepository } from '@/databases/repositories/user.repository';
+import { isApiEnabled } from '@/PublicApi';
+import { EventService } from '@/events/event.service';
+import { MfaService } from '@/Mfa/mfa.service';
+import { InvalidMfaCodeError } from '@/errors/response-errors/invalid-mfa-code.error';
+
+export const API_KEY_PREFIX = 'n8n_api_';
+
+export const isApiEnabledMiddleware: RequestHandler = (_, res, next) => {
+	if (isApiEnabled()) {
+		next();
+	} else {
+		res.status(404).end();
+	}
+};
 
 @RestController('/me')
 export class MeController {
 	constructor(
 		private readonly logger: Logger,
 		private readonly externalHooks: ExternalHooks,
-		private readonly internalHooks: InternalHooks,
 		private readonly authService: AuthService,
 		private readonly userService: UserService,
 		private readonly passwordUtility: PasswordUtility,
 		private readonly userRepository: UserRepository,
+		private readonly eventService: EventService,
+		private readonly mfaService: MfaService,
 	) {}
 
 	/**
@@ -41,7 +55,7 @@ export class MeController {
 	@Patch('/')
 	async updateCurrentUser(req: MeRequest.UserUpdate, res: Response): Promise<PublicUser> {
 		const { id: userId, email: currentEmail } = req.user;
-		const payload = plainToInstance(UserUpdatePayload, req.body);
+		const payload = plainToInstance(UserUpdatePayload, req.body, { excludeExtraneousValues: true });
 
 		const { email } = payload;
 		if (!email) {
@@ -78,6 +92,7 @@ export class MeController {
 
 		await this.externalHooks.run('user.profile.beforeUpdate', [userId, currentEmail, payload]);
 
+		const preUpdateUser = await this.userRepository.findOneByOrFail({ id: userId });
 		await this.userService.update(userId, payload);
 		const user = await this.userRepository.findOneOrFail({
 			where: { id: userId },
@@ -85,13 +100,13 @@ export class MeController {
 
 		this.logger.info('User updated successfully', { userId });
 
-		this.authService.issueCookie(res, user);
+		this.authService.issueCookie(res, user, req.browserId);
 
-		const updatedKeys = Object.keys(payload);
-		void this.internalHooks.onUserUpdate({
-			user,
-			fields_changed: updatedKeys,
-		});
+		const fieldsChanged = (Object.keys(payload) as Array<keyof UserUpdatePayload>).filter(
+			(key) => payload[key] !== preUpdateUser[key],
+		);
+
+		this.eventService.emit('user-updated', { user, fieldsChanged });
 
 		const publicUser = await this.userService.toPublic(user);
 
@@ -103,12 +118,12 @@ export class MeController {
 	/**
 	 * Update the logged-in user's password.
 	 */
-	@Patch('/password')
+	@Patch('/password', { rateLimit: true })
 	async updatePassword(req: MeRequest.Password, res: Response) {
 		const { user } = req;
-		const { currentPassword, newPassword } = req.body;
+		const { currentPassword, newPassword, mfaCode } = req.body;
 
-		// If SAML is enabled, we don't allow the user to change their email address
+		// If SAML is enabled, we don't allow the user to change their password
 		if (isSamlLicensedAndEnabled()) {
 			this.logger.debug('Attempted to change password for user, while SAML is enabled', {
 				userId: user.id,
@@ -133,17 +148,25 @@ export class MeController {
 
 		const validPassword = this.passwordUtility.validate(newPassword);
 
+		if (user.mfaEnabled) {
+			if (typeof mfaCode !== 'string') {
+				throw new BadRequestError('Two-factor code is required to change password.');
+			}
+
+			const isMfaTokenValid = await this.mfaService.validateMfa(user.id, mfaCode, undefined);
+			if (!isMfaTokenValid) {
+				throw new InvalidMfaCodeError();
+			}
+		}
+
 		user.password = await this.passwordUtility.hash(validPassword);
 
 		const updatedUser = await this.userRepository.save(user, { transaction: false });
 		this.logger.info('Password updated successfully', { userId: user.id });
 
-		this.authService.issueCookie(res, updatedUser);
+		this.authService.issueCookie(res, updatedUser, req.browserId);
 
-		void this.internalHooks.onUserUpdate({
-			user: updatedUser,
-			fields_changed: ['password'],
-		});
+		this.eventService.emit('user-updated', { user: updatedUser, fieldsChanged: ['password'] });
 
 		await this.externalHooks.run('user.password.update', [updatedUser.email, updatedUser.password]);
 
@@ -167,6 +190,8 @@ export class MeController {
 			throw new BadRequestError('Personalization answers are mandatory');
 		}
 
+		await validateRecordNoXss(personalizationAnswers);
+
 		await this.userRepository.save(
 			{
 				id: req.user.id,
@@ -177,7 +202,10 @@ export class MeController {
 
 		this.logger.info('User survey updated successfully', { userId: req.user.id });
 
-		void this.internalHooks.onPersonalizationSurveySubmitted(req.user.id, personalizationAnswers);
+		this.eventService.emit('user-submitted-personalization-survey', {
+			userId: req.user.id,
+			answers: personalizationAnswers,
+		});
 
 		return { success: true };
 	}
@@ -185,16 +213,13 @@ export class MeController {
 	/**
 	 * Creates an API Key
 	 */
-	@Post('/api-key')
+	@Post('/api-key', { middlewares: [isApiEnabledMiddleware] })
 	async createAPIKey(req: AuthenticatedRequest) {
 		const apiKey = `n8n_api_${randomBytes(40).toString('hex')}`;
 
 		await this.userService.update(req.user.id, { apiKey });
 
-		void this.internalHooks.onApiKeyCreated({
-			user: req.user,
-			public_api: false,
-		});
+		this.eventService.emit('public-api-key-created', { user: req.user, publicApi: false });
 
 		return { apiKey };
 	}
@@ -202,22 +227,20 @@ export class MeController {
 	/**
 	 * Get an API Key
 	 */
-	@Get('/api-key')
+	@Get('/api-key', { middlewares: [isApiEnabledMiddleware] })
 	async getAPIKey(req: AuthenticatedRequest) {
-		return { apiKey: req.user.apiKey };
+		const apiKey = this.redactApiKey(req.user.apiKey);
+		return { apiKey };
 	}
 
 	/**
 	 * Deletes an API Key
 	 */
-	@Delete('/api-key')
+	@Delete('/api-key', { middlewares: [isApiEnabledMiddleware] })
 	async deleteAPIKey(req: AuthenticatedRequest) {
 		await this.userService.update(req.user.id, { apiKey: null });
 
-		void this.internalHooks.onApiKeyDeleted({
-			user: req.user,
-			public_api: false,
-		});
+		this.eventService.emit('public-api-key-deleted', { user: req.user, publicApi: false });
 
 		return { success: true };
 	}
@@ -227,7 +250,12 @@ export class MeController {
 	 */
 	@Patch('/settings')
 	async updateCurrentUserSettings(req: MeRequest.UserSettingsUpdate): Promise<User['settings']> {
-		const payload = plainToInstance(UserSettingsUpdatePayload, req.body);
+		const payload = plainToInstance(UserSettingsUpdatePayload, req.body, {
+			excludeExtraneousValues: true,
+		});
+
+		await validateEntity(payload);
+
 		const { id } = req.user;
 
 		await this.userService.updateSettings(id, payload);
@@ -238,5 +266,15 @@ export class MeController {
 		});
 
 		return user.settings;
+	}
+
+	private redactApiKey(apiKey: string | null) {
+		if (!apiKey) return;
+		const keepLength = 5;
+		return (
+			API_KEY_PREFIX +
+			apiKey.slice(API_KEY_PREFIX.length, API_KEY_PREFIX.length + keepLength) +
+			'*'.repeat(apiKey.length - API_KEY_PREFIX.length - keepLength)
+		);
 	}
 }

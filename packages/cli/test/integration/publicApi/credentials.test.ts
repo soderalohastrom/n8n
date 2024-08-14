@@ -1,15 +1,18 @@
-import type { SuperAgentTest } from 'supertest';
-import type { User } from '@db/entities/User';
+import { Container } from 'typedi';
+import { randomString } from 'n8n-workflow';
 
-import { randomApiKey, randomName, randomString } from '../shared/random';
+import type { User } from '@db/entities/User';
+import { CredentialsRepository } from '@db/repositories/credentials.repository';
+import { SharedCredentialsRepository } from '@db/repositories/sharedCredentials.repository';
+
+import { randomApiKey, randomName } from '../shared/random';
 import * as utils from '../shared/utils/';
 import type { CredentialPayload, SaveCredentialFunction } from '../shared/types';
 import * as testDb from '../shared/testDb';
-import { affixRoleToSaveCredential } from '../shared/db/credentials';
+import { affixRoleToSaveCredential, createCredentials } from '../shared/db/credentials';
 import { addApiKey, createUser, createUserShell } from '../shared/db/users';
-import { CredentialsRepository } from '@db/repositories/credentials.repository';
-import Container from 'typedi';
-import { SharedCredentialsRepository } from '@db/repositories/sharedCredentials.repository';
+import type { SuperAgentTest } from '../shared/types';
+import { createTeamProject } from '@test-integration/db/projects';
 
 let owner: User;
 let member: User;
@@ -63,8 +66,16 @@ describe('POST /credentials', () => {
 		expect(credential.data).not.toBe(payload.data);
 
 		const sharedCredential = await Container.get(SharedCredentialsRepository).findOneOrFail({
-			relations: ['user', 'credentials'],
-			where: { credentialsId: credential.id, userId: owner.id },
+			relations: { credentials: true },
+			where: {
+				credentialsId: credential.id,
+				project: {
+					type: 'personal',
+					projectRelations: {
+						userId: owner.id,
+					},
+				},
+			},
 		});
 
 		expect(sharedCredential.role).toEqual('credential:owner');
@@ -203,7 +214,7 @@ describe('DELETE /credentials/:id', () => {
 
 		const response = await authMemberAgent.delete(`/credentials/${savedCredential.id}`);
 
-		expect(response.statusCode).toBe(404);
+		expect(response.statusCode).toBe(403);
 
 		const shellCredential = await Container.get(CredentialsRepository).findOneBy({
 			id: savedCredential.id,
@@ -246,6 +257,53 @@ describe('GET /credentials/schema/:credentialType', () => {
 	});
 });
 
+describe('PUT /credentials/:id/transfer', () => {
+	test('should transfer credential to project', async () => {
+		/**
+		 * Arrange
+		 */
+		const [firstProject, secondProject] = await Promise.all([
+			createTeamProject('first-project', owner),
+			createTeamProject('second-project', owner),
+		]);
+
+		const credentials = await createCredentials(
+			{ name: 'Test', type: 'test', data: '' },
+			firstProject,
+		);
+
+		/**
+		 * Act
+		 */
+		const response = await authOwnerAgent.put(`/credentials/${credentials.id}/transfer`).send({
+			destinationProjectId: secondProject.id,
+		});
+
+		/**
+		 * Assert
+		 */
+		expect(response.statusCode).toBe(204);
+	});
+
+	test('if no destination project, should reject', async () => {
+		/**
+		 * Arrange
+		 */
+		const project = await createTeamProject('first-project', member);
+		const credentials = await createCredentials({ name: 'Test', type: 'test', data: '' }, project);
+
+		/**
+		 * Act
+		 */
+		const response = await authOwnerAgent.put(`/credentials/${credentials.id}/transfer`).send({});
+
+		/**
+		 * Assert
+		 */
+		expect(response.statusCode).toBe(400);
+	});
+});
+
 const credentialPayload = (): CredentialPayload => ({
 	name: randomName(),
 	type: 'githubApi',
@@ -258,7 +316,6 @@ const credentialPayload = (): CredentialPayload => ({
 
 const dbCredential = () => {
 	const credential = credentialPayload();
-	credential.nodesAccess = [{ nodeType: credential.type }];
 
 	return credential;
 };
@@ -275,13 +332,6 @@ const INVALID_PAYLOADS = [
 	{
 		name: randomName(),
 		type: randomName(),
-	},
-	{
-		name: randomName(),
-		type: 'ftp',
-		data: {
-			username: randomName(),
-		},
 	},
 	{},
 	[],

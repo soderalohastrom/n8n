@@ -82,8 +82,8 @@ export class Grist implements INodeType {
 					planType === 'free'
 						? `https://docs.getgrist.com/api${endpoint}`
 						: planType === 'paid'
-						  ? `https://${customSubdomain}.getgrist.com/api${endpoint}`
-						  : `${selfHostedUrl}/api${endpoint}`;
+							? `https://${customSubdomain}.getgrist.com/api${endpoint}`
+							: `${selfHostedUrl}/api${endpoint}`;
 
 				const options: IRequestOptions = {
 					headers: {
@@ -244,7 +244,7 @@ export class Grist implements INodeType {
 					});
 				}
 			} catch (error) {
-				if (this.continueOnFail()) {
+				if (this.continueOnFail(error)) {
 					const executionData = this.helpers.constructExecutionMetaData(
 						this.helpers.returnJsonArray({ error: error.message }),
 						{ itemData: { item: i } },

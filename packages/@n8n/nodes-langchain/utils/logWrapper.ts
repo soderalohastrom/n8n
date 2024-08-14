@@ -1,28 +1,24 @@
 import { NodeOperationError, NodeConnectionType } from 'n8n-workflow';
 import type { ConnectionTypes, IExecuteFunctions, INodeExecutionData } from 'n8n-workflow';
 
-import { Tool } from 'langchain/tools';
-import type { ChatResult, InputValues, BaseMessage } from 'langchain/schema';
-import { BaseChatMessageHistory } from 'langchain/schema';
-import type { BaseChatModel } from 'langchain/chat_models/base';
-import type { CallbackManagerForLLMRun } from 'langchain/callbacks';
+import type { Tool } from '@langchain/core/tools';
+import type { BaseMessage } from '@langchain/core/messages';
+import type { InputValues, MemoryVariables, OutputValues } from '@langchain/core/memory';
+import type { BaseChatMessageHistory } from '@langchain/core/chat_history';
+import type { BaseCallbackConfig, Callbacks } from '@langchain/core/callbacks/manager';
 
-import { Embeddings } from 'langchain/embeddings/base';
-import { VectorStore } from 'langchain/vectorstores/base';
-import type { Document } from 'langchain/document';
-import { TextSplitter } from 'langchain/text_splitter';
-import type { BaseDocumentLoader } from 'langchain/document_loaders/base';
-import type { BaseCallbackConfig, Callbacks } from 'langchain/dist/callbacks/manager';
-import { BaseLLM } from 'langchain/llms/base';
-import { BaseChatMemory } from 'langchain/memory';
-import type { MemoryVariables } from 'langchain/dist/memory/base';
-import { BaseRetriever } from 'langchain/schema/retriever';
-import type { FormatInstructionsOptions } from 'langchain/schema/output_parser';
-import { BaseOutputParser, OutputParserException } from 'langchain/schema/output_parser';
+import { Embeddings } from '@langchain/core/embeddings';
+import { VectorStore } from '@langchain/core/vectorstores';
+import type { Document } from '@langchain/core/documents';
+import { TextSplitter } from '@langchain/textsplitters';
+import type { BaseChatMemory } from '@langchain/community/memory/chat_memory';
+import { BaseRetriever } from '@langchain/core/retrievers';
+import { BaseOutputParser, OutputParserException } from '@langchain/core/output_parsers';
 import { isObject } from 'lodash';
+import type { BaseDocumentLoader } from 'langchain/dist/document_loaders/base';
 import { N8nJsonLoader } from './N8nJsonLoader';
 import { N8nBinaryLoader } from './N8nBinaryLoader';
-import { isChatInstance, logAiEvent } from './helpers';
+import { logAiEvent, isToolsInstance, isBaseChatMemory, isBaseChatMessageHistory } from './helpers';
 
 const errorsMap: { [key: string]: { message: string; description: string } } = {
 	'You exceeded your current quota, please check your plan and billing details.': {
@@ -111,9 +107,7 @@ export function callMethodSync<T>(
 export function logWrapper(
 	originalInstance:
 		| Tool
-		| BaseChatModel
 		| BaseChatMemory
-		| BaseLLM
 		| BaseChatMessageHistory
 		| BaseOutputParser
 		| BaseRetriever
@@ -131,7 +125,7 @@ export function logWrapper(
 		get: (target, prop) => {
 			let connectionType: ConnectionTypes | undefined;
 			// ========== BaseChatMemory ==========
-			if (originalInstance instanceof BaseChatMemory) {
+			if (isBaseChatMemory(originalInstance)) {
 				if (prop === 'loadMemoryVariables' && 'loadMemoryVariables' in target) {
 					return async (values: InputValues): Promise<MemoryVariables> => {
 						connectionType = NodeConnectionType.AiMemory;
@@ -148,40 +142,42 @@ export function logWrapper(
 							arguments: [values],
 						})) as MemoryVariables;
 
+						const chatHistory = (response?.chat_history as BaseMessage[]) ?? response;
+
 						executeFunctions.addOutputData(connectionType, index, [
-							[{ json: { action: 'loadMemoryVariables', response } }],
+							[{ json: { action: 'loadMemoryVariables', chatHistory } }],
 						]);
 						return response;
 					};
-				} else if (
-					prop === 'outputKey' &&
-					'outputKey' in target &&
-					target.constructor.name === 'BufferWindowMemory'
-				) {
-					connectionType = NodeConnectionType.AiMemory;
-					const { index } = executeFunctions.addInputData(connectionType, [
-						[{ json: { action: 'chatHistory' } }],
-					]);
-					const response = target[prop];
+				} else if (prop === 'saveContext' && 'saveContext' in target) {
+					return async (input: InputValues, output: OutputValues): Promise<MemoryVariables> => {
+						connectionType = NodeConnectionType.AiMemory;
 
-					target.chatHistory
-						.getMessages()
-						.then((messages) => {
-							executeFunctions.addOutputData(NodeConnectionType.AiMemory, index, [
-								[{ json: { action: 'chatHistory', chatHistory: messages } }],
-							]);
-						})
-						.catch((error: Error) => {
-							executeFunctions.addOutputData(NodeConnectionType.AiMemory, index, [
-								[{ json: { action: 'chatHistory', error } }],
-							]);
-						});
-					return response;
+						const { index } = executeFunctions.addInputData(connectionType, [
+							[{ json: { action: 'saveContext', input, output } }],
+						]);
+
+						const response = (await callMethodAsync.call(target, {
+							executeFunctions,
+							connectionType,
+							currentNodeRunIndex: index,
+							method: target[prop],
+							arguments: [input, output],
+						})) as MemoryVariables;
+
+						const chatHistory = await target.chatHistory.getMessages();
+
+						executeFunctions.addOutputData(connectionType, index, [
+							[{ json: { action: 'saveContext', chatHistory } }],
+						]);
+
+						return response;
+					};
 				}
 			}
 
 			// ========== BaseChatMessageHistory ==========
-			if (originalInstance instanceof BaseChatMessageHistory) {
+			if (isBaseChatMessageHistory(originalInstance)) {
 				if (prop === 'getMessages' && 'getMessages' in target) {
 					return async (): Promise<BaseMessage[]> => {
 						connectionType = NodeConnectionType.AiMemory;
@@ -223,83 +219,9 @@ export function logWrapper(
 				}
 			}
 
-			// ========== BaseChatModel ==========
-			if (originalInstance instanceof BaseLLM || isChatInstance(originalInstance)) {
-				if (prop === '_generate' && '_generate' in target) {
-					return async (
-						messages: BaseMessage[] & string[],
-						options: any,
-						runManager?: CallbackManagerForLLMRun,
-					): Promise<ChatResult> => {
-						connectionType = NodeConnectionType.AiLanguageModel;
-						const { index } = executeFunctions.addInputData(connectionType, [
-							[{ json: { messages, options } }],
-						]);
-						try {
-							const response = (await callMethodAsync.call(target, {
-								executeFunctions,
-								connectionType,
-								currentNodeRunIndex: index,
-								method: target[prop],
-								arguments: [
-									messages,
-									{ ...options, signal: executeFunctions.getExecutionCancelSignal() },
-									runManager,
-								],
-							})) as ChatResult;
-							const parsedMessages =
-								typeof messages === 'string'
-									? messages
-									: messages.map((message) => {
-											if (typeof message === 'string') return message;
-											if (typeof message?.toJSON === 'function') return message.toJSON();
-
-											return message;
-									  });
-
-							void logAiEvent(executeFunctions, 'n8n.ai.llm.generated', {
-								messages: parsedMessages,
-								options,
-								response,
-							});
-							executeFunctions.addOutputData(connectionType, index, [[{ json: { response } }]]);
-							return response;
-						} catch (error) {
-							// Mute AbortError as they are expected
-							if (error?.name === 'AbortError') return { generations: [] };
-							throw error;
-						}
-					};
-				}
-			}
-
 			// ========== BaseOutputParser ==========
 			if (originalInstance instanceof BaseOutputParser) {
-				if (prop === 'getFormatInstructions' && 'getFormatInstructions' in target) {
-					return (options?: FormatInstructionsOptions): string => {
-						connectionType = NodeConnectionType.AiOutputParser;
-						const { index } = executeFunctions.addInputData(connectionType, [
-							[{ json: { action: 'getFormatInstructions' } }],
-						]);
-
-						// @ts-ignore
-						const response = callMethodSync.call(target, {
-							executeFunctions,
-							connectionType,
-							currentNodeRunIndex: index,
-							method: target[prop],
-							arguments: [options],
-						}) as string;
-
-						executeFunctions.addOutputData(connectionType, index, [
-							[{ json: { action: 'getFormatInstructions', response } }],
-						]);
-						void logAiEvent(executeFunctions, 'n8n.ai.output.parser.get.instructions', {
-							response,
-						});
-						return response;
-					};
-				} else if (prop === 'parse' && 'parse' in target) {
+				if (prop === 'parse' && 'parse' in target) {
 					return async (text: string | Record<string, unknown>): Promise<unknown> => {
 						connectionType = NodeConnectionType.AiOutputParser;
 						const stringifiedText = isObject(text) ? JSON.stringify(text) : text;
@@ -307,19 +229,30 @@ export function logWrapper(
 							[{ json: { action: 'parse', text: stringifiedText } }],
 						]);
 
-						const response = (await callMethodAsync.call(target, {
-							executeFunctions,
-							connectionType,
-							currentNodeRunIndex: index,
-							method: target[prop],
-							arguments: [stringifiedText],
-						})) as object;
+						try {
+							const response = (await callMethodAsync.call(target, {
+								executeFunctions,
+								connectionType,
+								currentNodeRunIndex: index,
+								method: target[prop],
+								arguments: [stringifiedText],
+							})) as object;
 
-						void logAiEvent(executeFunctions, 'n8n.ai.output.parser.parsed', { text, response });
-						executeFunctions.addOutputData(connectionType, index, [
-							[{ json: { action: 'parse', response } }],
-						]);
-						return response;
+							void logAiEvent(executeFunctions, 'n8n.ai.output.parser.parsed', { text, response });
+							executeFunctions.addOutputData(connectionType, index, [
+								[{ json: { action: 'parse', response } }],
+							]);
+							return response;
+						} catch (error) {
+							void logAiEvent(executeFunctions, 'n8n.ai.output.parser.parsed', {
+								text,
+								response: error.message ?? error,
+							});
+							executeFunctions.addOutputData(connectionType, index, [
+								[{ json: { action: 'parse', response: error.message ?? error } }],
+							]);
+							throw error;
+						}
 					};
 				}
 			}
@@ -468,7 +401,7 @@ export function logWrapper(
 			}
 
 			// ========== Tool ==========
-			if (originalInstance instanceof Tool) {
+			if (isToolsInstance(originalInstance)) {
 				if (prop === '_call' && '_call' in target) {
 					return async (query: string): Promise<string> => {
 						connectionType = NodeConnectionType.AiTool;
@@ -522,6 +455,7 @@ export function logWrapper(
 				}
 			}
 
+			// eslint-disable-next-line @typescript-eslint/no-unsafe-return
 			return (target as any)[prop];
 		},
 	});

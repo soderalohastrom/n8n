@@ -1,4 +1,4 @@
-import type { Application, Request, Response } from 'express';
+import type { Application } from 'express';
 import type {
 	ExecutionError,
 	ICredentialDataDecryptedObject,
@@ -22,11 +22,10 @@ import type {
 	FeatureFlags,
 	INodeProperties,
 	IUserSettings,
-	IHttpRequestMethods,
 	StartNodeData,
 } from 'n8n-workflow';
 
-import type { ActiveWorkflowRunner } from '@/ActiveWorkflowRunner';
+import type { ActiveWorkflowManager } from '@/ActiveWorkflowManager';
 
 import type { WorkflowExecute } from 'n8n-core';
 
@@ -35,7 +34,7 @@ import type PCancelable from 'p-cancelable';
 import type { AuthProviderType } from '@db/entities/AuthIdentity';
 import type { SharedCredentials } from '@db/entities/SharedCredentials';
 import type { TagEntity } from '@db/entities/TagEntity';
-import type { GlobalRole, User } from '@db/entities/User';
+import type { AssignableRole, GlobalRole, User } from '@db/entities/User';
 import type { CredentialsRepository } from '@db/repositories/credentials.repository';
 import type { SettingsRepository } from '@db/repositories/settings.repository';
 import type { UserRepository } from '@db/repositories/user.repository';
@@ -43,7 +42,7 @@ import type { WorkflowRepository } from '@db/repositories/workflow.repository';
 import type { ExternalHooks } from './ExternalHooks';
 import type { LICENSE_FEATURES, LICENSE_QUOTAS } from './constants';
 import type { WorkflowWithSharingsAndCredentials } from './workflows/workflows.types';
-import type { WorkerJobStatusSummary } from './services/orchestration/worker/types';
+import type { RunningJobSummary } from './scaling/types';
 import type { Scope } from '@n8n/permissions';
 
 export interface ICredentialsTypeData {
@@ -145,6 +144,7 @@ export interface IExecutionResponse extends IExecutionBase {
 	retryOf?: string;
 	retrySuccessId?: string;
 	workflowData: IWorkflowBase | WorkflowWithSharingsAndCredentials;
+	customData: Record<string, string>;
 }
 
 // Flatted data to save memory when saving in database or transferring
@@ -158,6 +158,7 @@ export interface IExecutionFlattedDb extends IExecutionBase {
 	id: string;
 	data: string;
 	workflowData: Omit<IWorkflowBase, 'pinData'>;
+	customData: Record<string, string>;
 }
 
 export interface IExecutionFlattedResponse extends IExecutionFlatted {
@@ -171,7 +172,7 @@ export interface IExecutionsListResponse {
 	estimated: boolean;
 }
 
-export interface IExecutionsStopData {
+export interface ExecutionStopResult {
 	finished?: boolean;
 	mode: WorkflowExecuteMode;
 	startedAt: Date;
@@ -185,7 +186,7 @@ export interface IExecutionsCurrentSummary {
 	startedAt: Date;
 	mode: WorkflowExecuteMode;
 	workflowId: string;
-	status?: ExecutionStatus;
+	status: ExecutionStatus;
 }
 
 export interface IExecutingWorkflowData {
@@ -230,49 +231,11 @@ export interface IExternalHooksFileData {
 
 export interface IExternalHooksFunctions {
 	dbCollections: {
-		/* eslint-disable @typescript-eslint/naming-convention */
 		User: UserRepository;
 		Settings: SettingsRepository;
 		Credentials: CredentialsRepository;
 		Workflow: WorkflowRepository;
-		/* eslint-enable @typescript-eslint/naming-convention */
 	};
-}
-
-export type WebhookCORSRequest = Request & { method: 'OPTIONS' };
-
-export type WebhookRequest = Request<{ path: string }> & {
-	method: IHttpRequestMethods;
-	params: Record<string, string>;
-};
-
-export type WaitingWebhookRequest = WebhookRequest & {
-	params: WebhookRequest['path'] & { suffix?: string };
-};
-
-export interface WebhookAccessControlOptions {
-	allowedOrigins?: string;
-}
-
-export interface IWebhookManager {
-	/** Gets all request methods associated with a webhook path*/
-	getWebhookMethods?: (path: string) => Promise<IHttpRequestMethods[]>;
-
-	/** Find the CORS options matching a path and method */
-	findAccessControlOptions?: (
-		path: string,
-		httpMethod: IHttpRequestMethods,
-	) => Promise<WebhookAccessControlOptions | undefined>;
-
-	executeWebhook(req: WebhookRequest, res: Response): Promise<IResponseCallbackData>;
-}
-
-export interface ITelemetryUserDeletionData {
-	user_id: string;
-	target_user_old_status: 'active' | 'invited';
-	migration_strategy?: 'transfer_data' | 'delete_data';
-	target_user_id?: string;
-	migration_user_id?: string;
 }
 
 export interface IVersionNotificationSettings {
@@ -312,7 +275,6 @@ export type IPushData =
 	| PushDataTestWebhook
 	| PushDataNodeDescriptionUpdated
 	| PushDataExecutionRecovered
-	| PushDataActiveWorkflowUsersChanged
 	| PushDataWorkerStatusMessage
 	| PushDataWorkflowActivated
 	| PushDataWorkflowDeactivated
@@ -331,11 +293,6 @@ type PushDataWorkflowActivated = {
 type PushDataWorkflowDeactivated = {
 	data: IActiveWorkflowChanged;
 	type: 'workflowDeactivated';
-};
-
-type PushDataActiveWorkflowUsersChanged = {
-	data: IActiveWorkflowUsersChanged;
-	type: 'activeWorkflowUsersChanged';
 };
 
 export type PushDataExecutionRecovered = {
@@ -393,18 +350,8 @@ export type PushDataNodeDescriptionUpdated = {
 	type: 'nodeDescriptionUpdated';
 };
 
-export interface IActiveWorkflowUser {
-	user: User;
-	lastSeen: Date;
-}
-
 export interface IActiveWorkflowAdded {
 	workflowId: Workflow['id'];
-}
-
-export interface IActiveWorkflowUsersChanged {
-	workflowId: Workflow['id'];
-	activeUsers: IActiveWorkflowUser[];
 }
 
 interface IActiveWorkflowChanged {
@@ -473,7 +420,7 @@ export interface IPushDataWorkerStatusMessage {
 
 export interface IPushDataWorkerStatusPayload {
 	workerId: string;
-	runningJobsSummary: WorkerJobStatusSummary[];
+	runningJobsSummary: RunningJobSummary[];
 	freeMem: number;
 	totalMem: number;
 	uptime: number;
@@ -488,13 +435,6 @@ export interface IPushDataWorkerStatusPayload {
 		internal: boolean;
 	}>;
 	version: string;
-}
-
-export interface IResponseCallbackData {
-	data?: IDataObject | IDataObject[];
-	headers?: object;
-	noWebhookResponse?: boolean;
-	responseCode?: number;
 }
 
 export interface INodesTypeData {
@@ -532,10 +472,11 @@ export interface IWorkflowExecutionDataProcess {
 	runData?: IRunData;
 	pinData?: IPinData;
 	retryOf?: string;
-	sessionId?: string;
+	pushRef?: string;
 	startNodes?: StartNodeData[];
 	workflowData: IWorkflowBase;
-	userId: string;
+	userId?: string;
+	projectId?: string;
 }
 
 export interface IWorkflowExecuteProcess {
@@ -623,7 +564,6 @@ export interface PublicUser {
 	passwordResetToken?: string;
 	createdAt: Date;
 	isPending: boolean;
-	hasRecoveryCodesLeft: boolean;
 	role?: GlobalRole;
 	globalScopes?: Scope[];
 	signInType: AuthProviderType;
@@ -634,11 +574,16 @@ export interface PublicUser {
 	featureFlags?: FeatureFlags;
 }
 
+export interface Invitation {
+	email: string;
+	role: AssignableRole;
+}
+
 export interface N8nApp {
 	app: Application;
 	restEndpoint: string;
 	externalHooks: ExternalHooks;
-	activeWorkflowRunner: ActiveWorkflowRunner;
+	activeWorkflowManager: ActiveWorkflowManager;
 }
 
 export type UserSettings = Pick<User, 'id' | 'settings'>;
@@ -669,7 +614,7 @@ export abstract class SecretsProvider {
 	abstract disconnect(): Promise<void>;
 	abstract update(): Promise<void>;
 	abstract test(): Promise<[boolean] | [boolean, string]>;
-	abstract getSecret(name: string): IDataObject | undefined;
+	abstract getSecret(name: string): unknown;
 	abstract hasSecret(name: string): boolean;
 	abstract getSecretNames(): string[];
 }

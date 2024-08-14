@@ -74,7 +74,9 @@ for (const evaluator of ['tmpl', 'tournament'] as const) {
 				expect(evaluate('={{Reflect}}')).toEqual({});
 				expect(evaluate('={{Proxy}}')).toEqual({});
 
-				expect(evaluate('={{constructor}}')).toEqual({});
+				expect(() => evaluate('={{constructor}}')).toThrowError(
+					new ExpressionError('Cannot access "constructor" due to security concerns'),
+				);
 
 				expect(evaluate('={{escape}}')).toEqual({});
 				expect(evaluate('={{unescape}}')).toEqual({});
@@ -166,7 +168,7 @@ for (const evaluator of ['tmpl', 'tournament'] as const) {
 				const testFn = jest.fn();
 				Object.assign(global, { testFn });
 				expect(() => evaluate("={{ Date['constructor']('testFn()')()}}")).toThrowError(
-					new ExpressionError('Arbitrary code execution detected'),
+					new ExpressionError('Cannot access "constructor" due to security concerns'),
 				);
 				expect(testFn).not.toHaveBeenCalled();
 			});
@@ -186,8 +188,8 @@ for (const evaluator of ['tmpl', 'tournament'] as const) {
 				}
 				test(t.expression, () => {
 					const evaluationTests = t.tests.filter(
-						(test) => test.type === 'evaluation',
-					) as ExpressionTestEvaluation[];
+						(test): test is ExpressionTestEvaluation => test.type === 'evaluation',
+					);
 
 					for (const test of evaluationTests) {
 						const input = test.input.map((d) => ({ json: d })) as any;
@@ -209,8 +211,8 @@ for (const evaluator of ['tmpl', 'tournament'] as const) {
 				}
 				test(t.expression, () => {
 					for (const test of t.tests.filter(
-						(test) => test.type === 'transform',
-					) as ExpressionTestTransform[]) {
+						(test): test is ExpressionTestTransform => test.type === 'transform',
+					)) {
 						const expr = t.expression;
 						expect(extendSyntax(expr, test.forceTransform)).toEqual(test.result ?? expr);
 					}

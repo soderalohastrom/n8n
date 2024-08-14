@@ -1,3 +1,4 @@
+import { promisify } from 'util';
 import {
 	type IExecuteFunctions,
 	type IDataObject,
@@ -8,7 +9,6 @@ import {
 
 import moment from 'moment-timezone';
 import * as ics from 'ics';
-import { promisify } from 'util';
 
 const createEvent = promisify(ics.createEvent);
 
@@ -60,7 +60,7 @@ export const description: INodeProperties[] = [
 		displayName: 'Options',
 		name: 'additionalFields',
 		type: 'collection',
-		placeholder: 'Add Option',
+		placeholder: 'Add option',
 		default: {},
 		options: [
 			{
@@ -354,7 +354,7 @@ export async function execute(this: IExecuteFunctions, items: INodeExecutionData
 			});
 		} catch (error) {
 			const errorDescription = error.description;
-			if (this.continueOnFail()) {
+			if (this.continueOnFail(error)) {
 				returnData.push({
 					json: {
 						error: error.message,

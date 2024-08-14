@@ -1,8 +1,6 @@
-import { mocked } from 'jest-mock';
 import Container from 'typedi';
 import { Not } from '@n8n/typeorm';
-
-import { InternalHooks } from '@/InternalHooks';
+import { EventService } from '@/events/event.service';
 import { ExternalHooks } from '@/ExternalHooks';
 import { UserManagementMailer } from '@/UserManagement/email';
 import { UserRepository } from '@/databases/repositories/user.repository';
@@ -26,19 +24,22 @@ import {
 
 import type { User } from '@/databases/entities/User';
 import type { UserInvitationResult } from '../../shared/utils/users';
+import { ProjectRelationRepository } from '@/databases/repositories/projectRelation.repository';
 
 describe('InvitationController', () => {
 	const mailer = mockInstance(UserManagementMailer);
 	const externalHooks = mockInstance(ExternalHooks);
-	const internalHooks = mockInstance(InternalHooks);
+	const eventService = mockInstance(EventService);
 
 	const testServer = utils.setupTestServer({ endpointGroups: ['invitations'] });
 
 	let instanceOwner: User;
 	let userRepository: UserRepository;
+	let projectRelationRepository: ProjectRelationRepository;
 
 	beforeAll(async () => {
 		userRepository = Container.get(UserRepository);
+		projectRelationRepository = Container.get(ProjectRelationRepository);
 		instanceOwner = await createOwner();
 	});
 
@@ -271,6 +272,39 @@ describe('InvitationController', () => {
 			assertStoredUserProps(storedUser);
 		});
 
+		test('should create personal project for shell account', async () => {
+			mailer.invite.mockResolvedValue({ emailSent: false });
+
+			const response: InvitationResponse = await testServer
+				.authAgentFor(instanceOwner)
+				.post('/invitations')
+				.send([{ email: randomEmail() }])
+				.expect(200);
+
+			const [result] = response.body.data;
+
+			const storedUser = await userRepository.findOneByOrFail({
+				id: result.user.id,
+			});
+
+			assertStoredUserProps(storedUser);
+
+			const projectRelation = await projectRelationRepository.findOneOrFail({
+				where: {
+					userId: storedUser.id,
+					role: 'project:personalOwner',
+					project: {
+						type: 'personal',
+					},
+				},
+				relations: { project: true },
+			});
+
+			expect(projectRelation).not.toBeUndefined();
+			expect(projectRelation.project.name).toBe(storedUser.createPersonalProjectName());
+			expect(projectRelation.project.type).toBe('personal');
+		});
+
 		test('should create admin shell when advanced permissions is licensed', async () => {
 			testServer.license.enable('feat:advancedPermissions');
 
@@ -377,14 +411,24 @@ describe('InvitationController', () => {
 			expect(externalHookName).toBe('user.invited');
 			expect(externalHookArg?.[0]).toStrictEqual([newUserEmail]);
 
-			// internal hooks
-
-			const calls = mocked(internalHooks).onUserTransactionalEmail.mock.calls;
-
-			for (const [onUserTransactionalEmailArg] of calls) {
-				expect(onUserTransactionalEmailArg.user_id).toBeDefined();
-				expect(onUserTransactionalEmailArg.message_type).toBe('New user invite');
-				expect(onUserTransactionalEmailArg.public_api).toBe(false);
+			for (const [eventName, payload] of eventService.emit.mock.calls) {
+				if (eventName === 'user-invited') {
+					expect(payload).toEqual({
+						user: expect.objectContaining({ id: expect.any(String) }),
+						targetUserId: expect.arrayContaining([expect.any(String), expect.any(String)]),
+						publicApi: false,
+						emailSent: true,
+						inviteeRole: 'global:member',
+					});
+				} else if (eventName === 'user-transactional-email-sent') {
+					expect(payload).toEqual({
+						userId: expect.any(String),
+						messageType: 'New user invite',
+						publicApi: false,
+					});
+				} else {
+					fail(`Unexpected event name: ${eventName}`);
+				}
 			}
 		});
 

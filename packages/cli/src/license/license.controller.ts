@@ -1,6 +1,8 @@
-import { Get, Post, GlobalScope, RestController } from '@/decorators';
-import { LicenseRequest } from '@/requests';
+import { Get, Post, RestController, GlobalScope } from '@/decorators';
+import { AuthenticatedRequest, LicenseRequest } from '@/requests';
 import { LicenseService } from './license.service';
+import { BadRequestError } from '@/errors/response-errors/bad-request.error';
+import type { AxiosError } from 'axios';
 
 @RestController('/license')
 export class LicenseController {
@@ -9,6 +11,23 @@ export class LicenseController {
 	@Get('/')
 	async getLicenseData() {
 		return await this.licenseService.getLicenseData();
+	}
+
+	@Post('/enterprise/request_trial')
+	@GlobalScope('license:manage')
+	async requestEnterpriseTrial(req: AuthenticatedRequest) {
+		try {
+			await this.licenseService.requestEnterpriseTrial(req.user);
+		} catch (error: unknown) {
+			if (error instanceof Error) {
+				const errorMsg =
+					(error as AxiosError<{ message: string }>).response?.data?.message ?? error.message;
+
+				throw new BadRequestError(errorMsg);
+			} else {
+				throw new BadRequestError('Failed to request trial');
+			}
+		}
 	}
 
 	@Post('/activate')

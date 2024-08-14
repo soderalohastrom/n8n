@@ -7,12 +7,14 @@ import {
 	faAngleLeft,
 	faAngleRight,
 	faAngleUp,
+	faArchive,
 	faArrowLeft,
 	faArrowRight,
 	faArrowUp,
 	faArrowDown,
 	faAt,
 	faBan,
+	faBalanceScaleLeft,
 	faBars,
 	faBolt,
 	faBook,
@@ -74,8 +76,10 @@ import {
 	faGraduationCap,
 	faGripLinesVertical,
 	faGripVertical,
+	faHandHoldingUsd,
 	faHandScissors,
 	faHandPointLeft,
+	faHandshake,
 	faHashtag,
 	faHdd,
 	faHistory,
@@ -126,10 +130,13 @@ import {
 	faSync,
 	faSyncAlt,
 	faTable,
+	faTags,
 	faTasks,
 	faTerminal,
 	faThLarge,
 	faThumbtack,
+	faThumbsDown,
+	faThumbsUp,
 	faTimes,
 	faTimesCircle,
 	faToolbox,
@@ -161,19 +168,21 @@ function addIcon(icon: IconDefinition) {
 	library.add(icon);
 }
 
-export const FontAwesomePlugin: Plugin<{}> = {
+export const FontAwesomePlugin: Plugin = {
 	install: (app) => {
 		addIcon(faAngleDoubleLeft);
 		addIcon(faAngleDown);
 		addIcon(faAngleLeft);
 		addIcon(faAngleRight);
 		addIcon(faAngleUp);
+		addIcon(faArchive);
 		addIcon(faArrowLeft);
 		addIcon(faArrowRight);
 		addIcon(faArrowUp);
 		addIcon(faArrowDown);
 		addIcon(faAt);
 		addIcon(faBan);
+		addIcon(faBalanceScaleLeft);
 		addIcon(faBars);
 		addIcon(faBolt);
 		addIcon(faBook);
@@ -235,7 +244,9 @@ export const FontAwesomePlugin: Plugin<{}> = {
 		addIcon(faGlobe);
 		addIcon(faGlobeAmericas);
 		addIcon(faGraduationCap);
+		addIcon(faHandHoldingUsd);
 		addIcon(faHandScissors);
+		addIcon(faHandshake);
 		addIcon(faHandPointLeft);
 		addIcon(faHashtag);
 		addIcon(faHdd);
@@ -292,10 +303,13 @@ export const FontAwesomePlugin: Plugin<{}> = {
 		addIcon(faSync);
 		addIcon(faSyncAlt);
 		addIcon(faTable);
+		addIcon(faTags);
 		addIcon(faTasks);
 		addIcon(faTerminal);
 		addIcon(faThLarge);
 		addIcon(faThumbtack);
+		addIcon(faThumbsDown);
+		addIcon(faThumbsUp);
 		addIcon(faTimes);
 		addIcon(faTimesCircle);
 		addIcon(faToolbox);

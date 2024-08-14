@@ -7,11 +7,13 @@ import type { RedisServiceBaseCommand, RedisServiceCommand } from './redis/Redis
 import { RedisService } from './redis.service';
 import { MultiMainSetup } from './orchestration/main/MultiMainSetup.ee';
 import type { WorkflowActivateMode } from 'n8n-workflow';
+import { InstanceSettings } from 'n8n-core';
 
 @Service()
 export class OrchestrationService {
 	constructor(
 		private readonly logger: Logger,
+		private readonly instanceSettings: InstanceSettings,
 		private readonly redisService: RedisService,
 		readonly multiMainSetup: MultiMainSetup,
 	) {}
@@ -33,18 +35,24 @@ export class OrchestrationService {
 		);
 	}
 
+	get isSingleMainSetup() {
+		return !this.isMultiMainSetupEnabled;
+	}
+
 	redisPublisher: RedisServicePubSubPublisher;
 
 	get instanceId() {
 		return config.getEnv('redis.queueModeId');
 	}
 
+	/** @deprecated use InstanceSettings.isLeader */
 	get isLeader() {
-		return config.getEnv('multiMainSetup.instanceType') === 'leader';
+		return this.instanceSettings.isLeader;
 	}
 
+	/** @deprecated use InstanceSettings.isFollower */
 	get isFollower() {
-		return config.getEnv('multiMainSetup.instanceType') !== 'leader';
+		return this.instanceSettings.isFollower;
 	}
 
 	sanityCheck() {
@@ -59,7 +67,7 @@ export class OrchestrationService {
 		if (this.isMultiMainSetupEnabled) {
 			await this.multiMainSetup.init();
 		} else {
-			config.set('multiMainSetup.instanceType', 'leader');
+			this.instanceSettings.markAsLeader();
 		}
 
 		this.isInitialized = true;
@@ -128,7 +136,11 @@ export class OrchestrationService {
 	 * Whether this instance may add webhooks to the `webhook_entity` table.
 	 */
 	shouldAddWebhooks(activationMode: WorkflowActivateMode) {
-		if (activationMode === 'init') return false;
+		// Always try to populate the webhook entity table as well as register the webhooks
+		// to prevent issues with users upgrading from a version < 1.15, where the webhook entity
+		// was cleared on shutdown to anything past 1.28.0, where we stopped populating it on init,
+		// causing all webhooks to break
+		if (activationMode === 'init') return true;
 
 		if (activationMode === 'leadershipChange') return false;
 

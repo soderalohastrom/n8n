@@ -6,13 +6,19 @@ import {
 	BACKEND_BASE_URL,
 } from '../constants';
 import { WorkflowPage, NDV } from '../pages';
+import { errorToast } from '../pages/notifications';
 
 const workflowPage = new WorkflowPage();
 const ndv = new NDV();
 
 describe('Data pinning', () => {
+	const maxPinnedDataSize = 16384;
+
 	beforeEach(() => {
 		workflowPage.actions.visit();
+		cy.window().then((win) => {
+			win.maxPinnedDataSize = maxPinnedDataSize;
+		});
 	});
 
 	it('Should be able to pin node output', () => {
@@ -69,6 +75,16 @@ describe('Data pinning', () => {
 		ndv.getters.outputTbodyCell(1, 0).should('include.text', 1);
 	});
 
+	it('should display pin data edit button for Webhook node', () => {
+		workflowPage.actions.addInitialNodeToCanvas('Webhook', { keepNdvOpen: true });
+
+		ndv.getters
+			.runDataPaneHeader()
+			.find('button')
+			.filter(':visible')
+			.should('have.attr', 'title', 'Edit Output');
+	});
+
 	it('Should be duplicating pin data when duplicating node', () => {
 		workflowPage.actions.addInitialNodeToCanvas('Schedule Trigger');
 		workflowPage.actions.addNodeToCanvas(EDIT_FIELDS_SET_NODE_NAME, true, true);
@@ -98,6 +114,8 @@ describe('Data pinning', () => {
 			.parent()
 			.should('have.class', 'is-disabled');
 
+		cy.get('body').type('{esc}');
+
 		// Unpin using context menu
 		workflowPage.actions.openNode(EDIT_FIELDS_SET_NODE_NAME);
 		ndv.actions.setPinnedData([{ test: 1 }]);
@@ -124,14 +142,23 @@ describe('Data pinning', () => {
 		ndv.getters.pinDataButton().should('not.exist');
 		ndv.getters.editPinnedDataButton().should('be.visible');
 
-		ndv.actions.setPinnedData([
+		ndv.actions.pastePinnedData([
 			{
-				test: '1'.repeat(Cypress.env('MAX_PINNED_DATA_SIZE')),
+				test: '1'.repeat(maxPinnedDataSize),
 			},
 		]);
-		workflowPage.getters
-			.errorToast()
-			.should('contain', 'Workflow has reached the maximum allowed pinned data size');
+		errorToast().should('contain', 'Workflow has reached the maximum allowed pinned data size');
+	});
+
+	it('Should show an error when pin data JSON in invalid', () => {
+		workflowPage.actions.addInitialNodeToCanvas('Schedule Trigger');
+		workflowPage.actions.addNodeToCanvas(EDIT_FIELDS_SET_NODE_NAME, true, true);
+		ndv.getters.container().should('be.visible');
+		ndv.getters.pinDataButton().should('not.exist');
+		ndv.getters.editPinnedDataButton().should('be.visible');
+
+		ndv.actions.setPinnedData('[ { "name": "First item", "code": 2dsa }]');
+		errorToast().should('contain', 'Unable to save due to invalid JSON');
 	});
 
 	it('Should be able to reference paired items in a node located before pinned data', () => {
@@ -145,6 +172,7 @@ describe('Data pinning', () => {
 		ndv.actions.close();
 
 		workflowPage.actions.addNodeToCanvas(EDIT_FIELDS_SET_NODE_NAME, true, true);
+
 		setExpressionOnStringValueInSet(`{{ $('${HTTP_REQUEST_NODE_NAME}').item`);
 
 		const output = '[Object: {"json": {"http": 123}, "pairedItem": {"item": 0}}]';
@@ -195,5 +223,7 @@ function setExpressionOnStringValueInSet(expression: string) {
 	ndv.getters
 		.inlineExpressionEditorInput()
 		.clear()
-		.type(expression, { parseSpecialCharSequences: false });
+		.type(expression, { parseSpecialCharSequences: false })
+		// hide autocomplete
+		.type('{esc}');
 }

@@ -15,13 +15,19 @@
 				</slot>
 			</N8nText>
 		</div>
-		<N8nButton
-			v-if="buttonText"
-			:label="buttonText"
-			:type="buttonType"
-			size="large"
-			@click="$emit('click:button', $event)"
-		/>
+		<N8nTooltip :disabled="!buttonDisabled">
+			<template #content>
+				<slot name="disabledButtonTooltip"></slot>
+			</template>
+			<N8nButton
+				v-if="buttonText"
+				:label="buttonText"
+				:type="buttonType"
+				:disabled="buttonDisabled"
+				size="large"
+				@click="$emit('click:button', $event)"
+			/>
+		</N8nTooltip>
 		<N8nCallout
 			v-if="calloutText"
 			:theme="calloutTheme"
@@ -35,48 +41,29 @@
 	</div>
 </template>
 
-<script lang="ts">
+<script lang="ts" setup>
 import N8nButton from '../N8nButton';
 import N8nHeading from '../N8nHeading';
 import N8nText from '../N8nText';
-import N8nCallout from '../N8nCallout';
-import { defineComponent } from 'vue';
+import N8nCallout, { type CalloutTheme } from '../N8nCallout';
+import type { ButtonType } from 'n8n-design-system/types/button';
+import N8nTooltip from 'n8n-design-system/components/N8nTooltip/Tooltip.vue';
 
-export default defineComponent({
-	name: 'N8nActionBox',
-	components: {
-		N8nButton,
-		N8nHeading,
-		N8nText,
-		N8nCallout,
-	},
-	props: {
-		emoji: {
-			type: String,
-		},
-		heading: {
-			type: String,
-		},
-		buttonText: {
-			type: String,
-		},
-		buttonType: {
-			type: String,
-		},
-		description: {
-			type: String,
-		},
-		calloutText: {
-			type: String,
-		},
-		calloutTheme: {
-			type: String,
-			default: 'info',
-		},
-		calloutIcon: {
-			type: String,
-		},
-	},
+interface ActionBoxProps {
+	emoji: string;
+	heading: string;
+	buttonText: string;
+	buttonType: ButtonType;
+	buttonDisabled?: boolean;
+	description: string;
+	calloutText?: string;
+	calloutTheme?: CalloutTheme;
+	calloutIcon?: string;
+}
+
+defineOptions({ name: 'N8nActionBox' });
+withDefaults(defineProps<ActionBoxProps>(), {
+	calloutTheme: 'info',
 });
 </script>
 

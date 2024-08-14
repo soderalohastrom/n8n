@@ -7,8 +7,8 @@ import type {
 	INodeType,
 	INodeTypeDescription,
 } from 'n8n-workflow';
-import type { BaseChatMemory } from 'langchain/memory';
-import { AIMessage, SystemMessage, HumanMessage, type BaseMessage } from 'langchain/schema';
+import type { BaseChatMemory } from '@langchain/community/memory/chat_memory';
+import { AIMessage, SystemMessage, HumanMessage, type BaseMessage } from '@langchain/core/messages';
 
 type MessageRole = 'ai' | 'system' | 'user';
 interface MessageRecord {
@@ -68,6 +68,7 @@ export class MemoryManager implements INodeType {
 		displayName: 'Chat Memory Manager',
 		name: 'memoryManager',
 		icon: 'fa:database',
+		iconColor: 'black',
 		group: ['transform'],
 		version: [1, 1.1],
 		description: 'Manage chat messages memory and use it in the workflow',
@@ -77,7 +78,7 @@ export class MemoryManager implements INodeType {
 		codex: {
 			categories: ['AI'],
 			subcategories: {
-				AI: ['Miscellaneous'],
+				AI: ['Miscellaneous', 'Root Nodes'],
 			},
 			resources: {
 				primaryDocumentation: [

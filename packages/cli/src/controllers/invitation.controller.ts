@@ -15,15 +15,14 @@ import { PostHogClient } from '@/posthog';
 import type { User } from '@/databases/entities/User';
 import { UserRepository } from '@db/repositories/user.repository';
 import { BadRequestError } from '@/errors/response-errors/bad-request.error';
-import { UnauthorizedError } from '@/errors/response-errors/unauthorized.error';
-import { InternalHooks } from '@/InternalHooks';
+import { ForbiddenError } from '@/errors/response-errors/forbidden.error';
 import { ExternalHooks } from '@/ExternalHooks';
+import { EventService } from '@/events/event.service';
 
 @RestController('/invitations')
 export class InvitationController {
 	constructor(
 		private readonly logger: Logger,
-		private readonly internalHooks: InternalHooks,
 		private readonly externalHooks: ExternalHooks,
 		private readonly authService: AuthService,
 		private readonly userService: UserService,
@@ -31,13 +30,14 @@ export class InvitationController {
 		private readonly passwordUtility: PasswordUtility,
 		private readonly userRepository: UserRepository,
 		private readonly postHog: PostHogClient,
+		private readonly eventService: EventService,
 	) {}
 
 	/**
 	 * Send email invite(s) to one or multiple users and create user shell(s).
 	 */
 
-	@Post('/')
+	@Post('/', { rateLimit: { limit: 10 } })
 	@GlobalScope('user:create')
 	async inviteUser(req: UserRequest.Invite) {
 		const isWithinUsersLimit = this.license.isWithinUsersLimit();
@@ -55,7 +55,7 @@ export class InvitationController {
 			this.logger.debug(
 				'Request to send email invite(s) to user(s) failed because the user limit quota has been reached',
 			);
-			throw new UnauthorizedError(RESPONSE_ERROR_MESSAGES.USERS_QUOTA_REACHED);
+			throw new ForbiddenError(RESPONSE_ERROR_MESSAGES.USERS_QUOTA_REACHED);
 		}
 
 		if (!config.getEnv('userManagement.isInstanceOwnerSetUp')) {
@@ -98,7 +98,7 @@ export class InvitationController {
 			}
 
 			if (invite.role === 'global:admin' && !this.license.isAdvancedPermissionsLicensed()) {
-				throw new UnauthorizedError(
+				throw new ForbiddenError(
 					'Cannot invite admin user without advanced permissions. Please upgrade to a license that includes this feature.',
 				);
 			}
@@ -164,11 +164,12 @@ export class InvitationController {
 
 		const updatedUser = await this.userRepository.save(invitee, { transaction: false });
 
-		this.authService.issueCookie(res, updatedUser);
+		this.authService.issueCookie(res, updatedUser, req.browserId);
 
-		void this.internalHooks.onUserSignup(updatedUser, {
-			user_type: 'email',
-			was_disabled_ldap_user: false,
+		this.eventService.emit('user-signed-up', {
+			user: updatedUser,
+			userType: 'email',
+			wasDisabledLdapUser: false,
 		});
 
 		const publicInvitee = await this.userService.toPublic(invitee);
